@@ -23,6 +23,8 @@ import org.scalastyle.ScalariformChecker
 import org.scalastyle.ScalastyleError
 import scalariform.parser.CompilationUnit
 import scalariform.lexer.Tokens.STRING_LITERAL
+import scalariform.lexer.Tokens.STRING_PART
+import scalariform.lexer.Token
 
 class MultipleStringLiteralsChecker extends ScalariformChecker {
   private val DefaultAllowed = 1
@@ -36,8 +38,38 @@ class MultipleStringLiteralsChecker extends ScalariformChecker {
     val allowed = getInt("allowed", DefaultAllowed)
     val ignoreRegex = getString("ignoreRegex", DefaultIgnoreRegex).r
 
-    val ts = ast.tokens.filter(t => t.tokenType == STRING_LITERAL).groupBy(t => strip(t.text)).filter(g => !matches(g._1, ignoreRegex))
-    ts.filter(g => g._2.size > allowed).map(g => PositionError(g._2(0).offset, List(g._1, "" + g._2.size, "" + allowed))).toList.sortBy(_.position)
+    import MultipleStringLiteralsChecker._
+
+    val fixedTokens = ast.tokens.foldLeft(StateContainer(NOT_IN_STRING_PART, Seq())) {
+      case (sc@StateContainer(NOT_IN_STRING_PART, tokens), token) =>
+        token match {
+          case Token(STRING_PART, text, pos, rawText) =>
+            StateContainer(IN_STRING_PART(Seq((text, rawText)), pos), tokens)
+          case t =>
+            sc.copy(tokens = t +: tokens)
+        }
+      case (sc@StateContainer(part@IN_STRING_PART(strPart, pos), tokens), token) =>
+        token match {
+          case Token(STRING_LITERAL, text, _, rawText) =>
+            val (t, rt) = ((text, rawText) +: strPart).reverse.unzip
+            StateContainer(NOT_IN_STRING_PART,
+              Token(STRING_LITERAL, t.mkString, pos, rt.mkString) +: tokens)
+          case Token(_, text, _, rawText) =>
+            sc.copy(state = part.copy(stringPart = (text, rawText) +: part.stringPart))
+        }
+      case _ =>
+        throw new RuntimeException("Impossible case reached!")
+    } match {
+      case StateContainer(NOT_IN_STRING_PART, tokens) =>
+        tokens.reverse
+      case _ =>
+        throw new RuntimeException("AST is broken, unclosed string interpolation")
+    }
+    println(fixedTokens)
+    val ts = fixedTokens.filter(t => t.tokenType == STRING_LITERAL).groupBy(t => strip(t.text)).filter(g => !matches(g._1, ignoreRegex))
+    val result = ts.filter(g => g._2.size > allowed).map(g => PositionError(g._2(0).offset, List(g._1, "" + g._2.size, "" + allowed))).toList.sortBy(_.position)
+    println(result)
+    result
   }
 
   private def matches(s: String, regex: Regex) = (regex findAllIn (s)).size == 1
@@ -51,4 +83,22 @@ class MultipleStringLiteralsChecker extends ScalariformChecker {
   }
 
   private def startsAndEndsWith(s: String, sufpre: String) = s.startsWith(sufpre) && s.endsWith(sufpre)
+}
+
+private object MultipleStringLiteralsChecker {
+
+  case class StateContainer(state: TokenState,
+    tokens: Seq[Token]
+  )
+
+  sealed trait TokenState
+
+  case object NOT_IN_STRING_PART extends TokenState
+
+  case class IN_STRING_PART(
+    stringPart: Seq[(String, String)],
+    startPos: Int
+  ) extends TokenState
+
+  def collapseStringParts(tokens:
 }
